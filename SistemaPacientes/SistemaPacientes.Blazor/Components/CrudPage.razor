@@ -1,0 +1,276 @@
+@typeparam TDto where TDto : BaseDto, new()
+@using System.Reflection
+@using System.ComponentModel.DataAnnotations
+@using System.Text.Json
+@using System.Text.RegularExpressions
+@inject ICrudClient Api
+@inject IJSRuntime JS
+
+<h3 class="mb-3">@Titulo</h3>
+
+@if (mensaje is not null)
+{
+    <div class="alert @(esError ? "alert-danger" : "alert-success")">@mensaje</div>
+}
+
+@if (editando is null)
+{
+    <button class="btn btn-primary mb-3" @onclick="Nuevo">+ Nuevo</button>
+
+    @if (items is null)
+    {
+        <p>Cargando...</p>
+    }
+    else if (items.Count == 0)
+    {
+        <p class="text-muted">No hay registros todavía.</p>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-striped align-middle">
+                <thead>
+                    <tr>
+                        @foreach (var p in ColumnasTabla)
+                        {
+                            <th>@Etiqueta(p)</th>
+                        }
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var item in items)
+                    {
+                        <tr>
+                            @foreach (var p in ColumnasTabla)
+                            {
+                                <td>@Formatear(p.GetValue(item))</td>
+                            }
+                            <td class="text-end text-nowrap">
+                                <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => Editar(item)">Editar</button>
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => Eliminar(item)">Eliminar</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+else
+{
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title mb-3">@(editando.Id == 0 ? "Nuevo registro" : "Editar registro")</h5>
+
+            @foreach (var p in CamposForm)
+            {
+                var lookup = p.GetCustomAttribute<LookupAttribute>();
+                var opciones = p.GetCustomAttribute<OpcionesAttribute>();
+                var larga = (p.GetCustomAttribute<StringLengthAttribute>()?.MaximumLength ?? 0) > 200;
+
+                <div class="mb-3">
+                    <label class="form-label">@Etiqueta(p)</label>
+
+                    @if (lookup is not null)
+                    {
+                        <select class="form-select" value="@ValorTexto(p)" @onchange="e => Set(p, e.Value)">
+                            <option value="">-- Seleccione --</option>
+                            @foreach (var o in lookups.GetValueOrDefault(lookup.Endpoint) ?? new List<LookupDto>())
+                            {
+                                <option value="@o.Id">@o.Texto</option>
+                            }
+                        </select>
+                    }
+                    else if (opciones is not null)
+                    {
+                        <select class="form-select" value="@ValorTexto(p)" @onchange="e => Set(p, e.Value)">
+                            @foreach (var o in opciones.Valores)
+                            {
+                                <option value="@o">@o</option>
+                            }
+                        </select>
+                    }
+                    else if (larga)
+                    {
+                        <textarea class="form-control" rows="3" value="@ValorTexto(p)" @onchange="e => Set(p, e.Value)"></textarea>
+                    }
+                    else
+                    {
+                        <input type="@TipoInput(p)" class="form-control" value="@ValorTexto(p)" @onchange="e => Set(p, e.Value)" />
+                    }
+
+                    @if (errores.TryGetValue(p.Name, out var msg))
+                    {
+                        <div class="text-danger small">@msg</div>
+                    }
+                </div>
+            }
+
+            <button class="btn btn-success me-2" @onclick="Guardar">Guardar</button>
+            <button class="btn btn-secondary" @onclick="Cancelar">Cancelar</button>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Endpoint { get; set; } = "";
+    [Parameter, EditorRequired] public string Titulo { get; set; } = "";
+
+    private List<TDto>? items;
+    private TDto? editando;
+    private string? mensaje;
+    private bool esError;
+    private readonly Dictionary<string, string> errores = new();
+    private readonly Dictionary<string, List<LookupDto>> lookups = new();
+
+    private static readonly PropertyInfo[] Props = typeof(TDto)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .OrderBy(p => p.DeclaringType == typeof(TDto) ? 1 : 0)   // Id primero
+        .ToArray();
+
+    // Tabla: todo menos las FK (se muestra su nombre en la propiedad SoloLectura)
+    private IEnumerable<PropertyInfo> ColumnasTabla => Props.Where(p => p.GetCustomAttribute<LookupAttribute>() is null);
+
+    // Formulario: todo menos Id y las propiedades de solo lectura
+    private IEnumerable<PropertyInfo> CamposForm => Props.Where(p => p.Name != "Id" && p.GetCustomAttribute<SoloLecturaAttribute>() is null);
+
+    protected override async Task OnInitializedAsync() => await Cargar();
+
+    private async Task Cargar()
+    {
+        try { items = await Api.ListarAsync<TDto>(Endpoint); }
+        catch (Exception ex)
+        {
+            items = new List<TDto>();
+            Mostrar($"No se pudo cargar la información: {ex.Message}", true);
+        }
+    }
+
+    private async Task CargarLookups()
+    {
+        try
+        {
+            foreach (var p in Props)
+            {
+                var lk = p.GetCustomAttribute<LookupAttribute>();
+                if (lk is not null) lookups[lk.Endpoint] = await Api.LookupAsync(lk.Endpoint);
+            }
+        }
+        catch (Exception ex) { Mostrar($"No se pudieron cargar las listas: {ex.Message}", true); }
+    }
+
+    private async Task Nuevo()
+    {
+        errores.Clear(); mensaje = null;
+        await CargarLookups();
+        editando = new TDto();
+    }
+
+    private async Task Editar(TDto item)
+    {
+        errores.Clear(); mensaje = null;
+        await CargarLookups();
+        editando = JsonSerializer.Deserialize<TDto>(JsonSerializer.Serialize(item))!;   // copia
+    }
+
+    private void Cancelar() { editando = null; errores.Clear(); mensaje = null; }
+
+    private async Task Guardar()
+    {
+        errores.Clear();
+
+        var resultados = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(editando!, new ValidationContext(editando!), resultados, true))
+        {
+            foreach (var r in resultados)
+                foreach (var miembro in r.MemberNames)
+                    errores[miembro] = r.ErrorMessage ?? "Valor inválido";
+            return;
+        }
+
+        var error = await Ejecutar(() => editando!.Id == 0
+            ? Api.CrearAsync(Endpoint, editando)
+            : Api.ActualizarAsync(Endpoint, editando.Id, editando));
+
+        if (error is not null) { Mostrar(error, true); return; }
+
+        editando = null;
+        Mostrar("Guardado correctamente.", false);
+        await Cargar();
+    }
+
+    private async Task Eliminar(TDto item)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", "¿Seguro que desea eliminar este registro?")) return;
+
+        var error = await Ejecutar(() => Api.EliminarAsync(Endpoint, item.Id));
+        if (error is not null) { Mostrar(error, true); return; }
+
+        Mostrar("Registro eliminado.", false);
+        await Cargar();
+    }
+
+    private static async Task<string?> Ejecutar(Func<Task<string?>> accion)
+    {
+        try { return await accion(); }
+        catch (HttpRequestException) { return "No se pudo conectar con la API. ¿Está en ejecución?"; }
+    }
+
+    private void Mostrar(string texto, bool error) { mensaje = texto; esError = error; }
+
+    // ---------- helpers de reflexión ----------
+    private static string Etiqueta(PropertyInfo p) =>
+        p.GetCustomAttribute<DisplayAttribute>()?.Name ?? Regex.Replace(p.Name, "(?<!^)([A-Z])", " $1");
+
+    private static bool EsFechaHora(PropertyInfo p) =>
+        p.GetCustomAttribute<DataTypeAttribute>()?.DataType == DataType.DateTime;
+
+    private static string TipoInput(PropertyInfo p)
+    {
+        var t = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+        if (t == typeof(DateTime)) return EsFechaHora(p) ? "datetime-local" : "date";
+        if (t == typeof(int)) return "number";
+        return "text";
+    }
+
+    private string ValorTexto(PropertyInfo p)
+    {
+        var v = p.GetValue(editando);
+        return v switch
+        {
+            null => "",
+            int i when i == 0 && p.GetCustomAttribute<LookupAttribute>() is not null => "",
+            DateTime d => d.ToString(EsFechaHora(p) ? "yyyy-MM-ddTHH:mm" : "yyyy-MM-dd"),
+            _ => v.ToString() ?? ""
+        };
+    }
+
+    private void Set(PropertyInfo p, object? valor)
+    {
+        var texto = valor?.ToString();
+        var tipo = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+        var aceptaNulo = !p.PropertyType.IsValueType || Nullable.GetUnderlyingType(p.PropertyType) is not null;
+
+        object? convertido;
+        if (string.IsNullOrWhiteSpace(texto))
+            convertido = aceptaNulo ? null : Activator.CreateInstance(tipo);
+        else if (tipo == typeof(string))
+            convertido = texto;
+        else if (tipo == typeof(int))
+            convertido = int.TryParse(texto, out var n) ? n : 0;
+        else if (tipo == typeof(DateTime))
+            convertido = DateTime.TryParse(texto, out var d) ? d : default(DateTime);
+        else
+            convertido = Convert.ChangeType(texto, tipo);
+
+        p.SetValue(editando, convertido);
+    }
+
+    private static string Formatear(object? v) => v switch
+    {
+        null => "",
+        DateTime d => d.ToString(d.TimeOfDay == TimeSpan.Zero ? "dd/MM/yyyy" : "dd/MM/yyyy HH:mm"),
+        _ => v.ToString() ?? ""
+    };
+}

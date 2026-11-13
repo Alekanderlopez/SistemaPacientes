@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="SistemaPacientes.API/SistemaPacientes.API.csproj" />
+  <Project Path="SistemaPacientes.Blazor/SistemaPacientes.Blazor.csproj" />
+  <Project Path="SistemaPacientes.BLL/SistemaPacientes.BLL.csproj" />
+  <Project Path="SistemaPacientes.DAL/SistemaPacientes.DAL.csproj" />
+  <Project Path="SistemaPacientes.Entities/SistemaPacientes.Entities.csproj" />
+</Solution>
